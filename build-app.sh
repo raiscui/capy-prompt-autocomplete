@@ -7,5 +7,11 @@ app="$PWD/.build/Capy Prompts.app"
 mkdir -p "$app/Contents/MacOS"
 cp "$bin/CapyPrompts" "$app/Contents/MacOS/CapyPrompts"
 cp Info.plist "$app/Contents/Info.plist"
-codesign --force --sign - "$app"
+bundle_id=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Contents/Info.plist")
+if [ "$bundle_id" != 'local.capyprompts.companion' ]; then
+    printf 'Unexpected Capy Prompts bundle identifier: %s\n' "$bundle_id" >&2
+    exit 1
+fi
+/usr/bin/codesign --force --sign - --identifier "$bundle_id" "$app"
+/usr/bin/codesign --verify --strict "$app"
 printf '%s\n' "$app"
