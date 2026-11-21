@@ -12,7 +12,7 @@ import Carbon.HIToolbox
 /// Overlay picker for Capy prompt autocomplete suggestions.
 ///
 /// The picker owns two pieces of UI:
-///   * a nonactivating `NSPanel` shown near the Capy editor (a single-line
+///   * a nonactivating `NSPanel` shown near the Capy editor (a wrapped
 ///     *ghost preview* or a selectable candidate *list*), and
 ///   * a small status HUD for transient error feedback.
 ///
@@ -110,22 +110,15 @@ final class Picker: NSObject {
 
     private let panel = NonactivatingPanel()
     private let statusPanel = NonactivatingPanel()
-    private var ghostView: NSView!
-    private var listView: NSView!
-    private var ghostCandidateLabel: NSTextField!
-    private var listStack: NSStackView!
     private var rowViews: [CandidateRowView] = []
     private var statusLabel: NSTextField!
     private var statusHideWork: DispatchWorkItem?
 
-    private let maxRows = 10
 
     // MARK: - Init
 
     override init() {
         super.init()
-        buildGhostView()
-        buildListView()
         buildStatusPanel()
     }
 
@@ -191,7 +184,7 @@ final class Picker: NSObject {
     }
 
     /// Shows candidates near the Capy editor.
-    /// - Parameter full: `false` renders a one-line ghost preview of the first
+    /// - Parameter full: `false` renders a wrapped preview of the first
     ///   candidate; `true` renders the selectable list.
     func show(_ candidates: [String], full: Bool) {
         onMain { [self] in
@@ -204,7 +197,6 @@ final class Picker: NSObject {
             self.candidates = candidates
             self.selectedIndex = 0
             self.showingList = full
-            if full { rebuildListRows() } else { rebuildGhost() }
             presentPanel()
             refreshHotkeyRegistration()
         }
@@ -308,21 +300,85 @@ final class Picker: NSObject {
 
     private func moveSelection(_ delta: Int) {
         guard panelVisible, showingList, !rowViews.isEmpty else { return }
-        let count = min(candidates.count, maxRows)
-        selectedIndex = (selectedIndex + delta + count) % count
-        updateRowHighlights()
+        let count = rowViews.count
+        selectRow((selectedIndex + delta + count) % count)
     }
 
     // MARK: - Panel presentation
 
     private func presentPanel() {
-        let content = showingList ? listView! : ghostView!
-        panel.contentView = content
-        let fitting = content.fittingSize
-        let size = NSSize(width: min(max(fitting.width, 320), 600), height: fitting.height)
-        panel.setFrame(CGRect(origin: panelOrigin(size: size), size: size), display: true)
+        guard let placement = panelPlacement() else { return }
+        let bounds = placement.bounds
+        let font = NSFont.systemFont(ofSize: 13)
+        let displayed = showingList ? candidates : Array(candidates.prefix(1))
+        let longest = displayed.map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
+        let width = min(bounds.width, 600, max(320, ceil(longest) + 84))
+        let footer = hintLabel(showingList ? "⌃⌥1–3 insert · ⌃⌥↑↓ choose · ⌃⌥⏎ insert · ⌃⌥Esc dismiss" : "⌃⌥Space list · ⌃⌥1 insert · ⌃⌥Esc dismiss")
+        let headerHeight: CGFloat = showingList ? 22 : 4
+        let footerHeight: CGFloat = 24
+        let document = FlippedDocument()
+        rowViews.removeAll()
+        let rowWidth = max(1, width - 28)
+        var y: CGFloat = 0
+        for (index, text) in displayed.enumerated() {
+            let row = CandidateRowView()
+            row.wantsLayer = true
+            row.layer?.cornerRadius = 5
+            let label = NSTextField(wrappingLabelWithString: text)
+            label.font = font
+            label.maximumNumberOfLines = 0
+            label.lineBreakMode = .byWordWrapping
+            let badgeWidth: CGFloat = showingList ? 40 : 0
+            let textWidth = max(1, rowWidth - 12 - badgeWidth)
+            let textHeight = ceil(label.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: textWidth, height: .greatestFiniteMagnitude)).height)
+            let height = max(22, textHeight + 8)
+            row.frame = NSRect(x: 0, y: y, width: rowWidth, height: height)
+            label.frame = NSRect(x: 6, y: 4, width: textWidth, height: height - 8)
+            row.addSubview(label)
+            if showingList {
+                let badge = hintLabel("⌃⌥\(index + 1)")
+                badge.frame = NSRect(x: rowWidth - badgeWidth, y: height - 19, width: badgeWidth, height: 16)
+                row.addSubview(badge)
+                row.onSelect = { [weak self] in self?.selectRow(index) }
+                row.onAccept = { [weak self] in self?.acceptCandidate(index) }
+            }
+            document.addSubview(row)
+            rowViews.append(row)
+            y += height + 2
+        }
+        document.frame.size = NSSize(width: rowWidth, height: y)
+        let viewport = min(y, max(1, floor(bounds.height * 0.60) - headerHeight - footerHeight))
+        let size = NSSize(width: width, height: headerHeight + viewport + footerHeight)
+        let effect = styledEffectView()
+        effect.frame.size = size
+        let scroll = NSScrollView(frame: NSRect(x: 8, y: footerHeight, width: width - 16, height: viewport))
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = y > viewport
+        scroll.scrollerStyle = .overlay
+        scroll.documentView = document
+        effect.addSubview(scroll)
+        if showingList {
+            let title = hintLabel("Completions")
+            title.frame = NSRect(x: 12, y: size.height - headerHeight, width: width - 24, height: headerHeight - 2)
+            effect.addSubview(title)
+            updateRowHighlights()
+        }
+        footer.frame = NSRect(x: 12, y: 4, width: width - 24, height: footerHeight - 6)
+        effect.addSubview(footer)
+        panel.contentView = effect
+        panel.setFrame(CGRect(origin: panelOrigin(size: size, placement: placement), size: size), display: true)
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
         panel.orderFrontRegardless()
         panelVisible = true
+    }
+
+    private func selectRow(_ index: Int) {
+        guard eligible?() == true, rowViews.indices.contains(index) else { return }
+        selectedIndex = index
+        updateRowHighlights()
+        let row = rowViews[index]
+        row.scrollToVisible(NSRect(x: 0, y: max(0, row.bounds.height - 18), width: 1, height: 18))
     }
 
     // MARK: - Anchoring
@@ -387,37 +443,27 @@ final class Picker: NSObject {
         return best
     }
 
-    /// Converts a top-left-origin AX point into Cocoa bottom-left-origin
-    /// coordinates on the given screen.
-    private func cocoaPoint(_ axPoint: CGPoint, on screen: NSScreen) -> CGPoint {
-        guard let primary = NSScreen.screens.first else { return axPoint }
-        let screenTopAX = primary.frame.height - screen.frame.maxY
-        return CGPoint(x: axPoint.x,
-                       y: screen.frame.maxY - (axPoint.y - screenTopAX))
+    private func panelPlacement() -> (anchor: CGRect, bounds: CGRect)? {
+        guard let primary = NSScreen.screens.first else { return nil }
+        let anchor: CGRect
+        if let ax = editorAnchor() ?? frontmostWindowFrame() {
+            anchor = CGRect(x: ax.minX, y: primary.frame.maxY - ax.maxY, width: ax.width, height: ax.height)
+        } else {
+            anchor = CGRect(origin: NSEvent.mouseLocation, size: CGSize(width: 1, height: 1))
+        }
+        let screen = NSScreen.screens.max { a, b in
+            let left = a.frame.intersection(anchor), right = b.frame.intersection(anchor)
+            return left.width * left.height < right.width * right.height
+        } ?? primary
+        return (anchor, screen.visibleFrame.insetBy(dx: 8, dy: 8))
     }
 
-    private func panelOrigin(size: NSSize) -> NSPoint {
-        // Desired top-left corner, in AX (top-left-origin) coordinates.
-        var topLeft: CGPoint
-        if let anchor = editorAnchor() {
-            topLeft = CGPoint(x: anchor.minX, y: anchor.maxY + 6) // just below the focused element/window
-        } else if let frame = frontmostWindowFrame() {
-            topLeft = CGPoint(x: frame.minX + 24, y: frame.maxY - size.height - 24) // inside bottom-left
-        } else {
-            let mouse = NSEvent.mouseLocation // cocoa coords; convert to AX-ish below
-            topLeft = CGPoint(x: mouse.x, y: (NSScreen.screens.first?.frame.height ?? 0) - mouse.y + 12)
-        }
-
-        let screen = NSScreen.screens.first { $0.frame.contains(cocoaPoint(topLeft, on: $0)) }
-            ?? NSScreen.screens.first
-        var origin = cocoaPoint(topLeft, on: screen ?? NSScreen.screens[0])
-        origin.y -= size.height // panel origin is the bottom-left corner
-
-        if let vf = screen?.visibleFrame {
-            origin.x = min(max(origin.x, vf.minX + 8), vf.maxX - size.width - 8)
-            origin.y = min(max(origin.y, vf.minY + 8), vf.maxY - size.height - 8)
-        }
-        return origin
+    private func panelOrigin(size: NSSize, placement: (anchor: CGRect, bounds: CGRect)) -> NSPoint {
+        let (anchor, bounds) = placement
+        let below = anchor.minY - size.height - 6
+        let preferredY = below >= bounds.minY ? below : anchor.maxY + 6
+        return NSPoint(x: min(max(anchor.minX, bounds.minX), bounds.maxX - size.width),
+                       y: min(max(preferredY, bounds.minY), bounds.maxY - size.height))
     }
 
     // MARK: - Views
@@ -439,116 +485,6 @@ final class Picker: NSObject {
         l.textColor = .tertiaryLabelColor
         l.lineBreakMode = .byTruncatingTail
         return l
-    }
-
-    private func buildGhostView() {
-        ghostCandidateLabel = NSTextField(labelWithString: "")
-        ghostCandidateLabel.font = .systemFont(ofSize: 13)
-        ghostCandidateLabel.textColor = .secondaryLabelColor
-        ghostCandidateLabel.lineBreakMode = .byTruncatingTail
-        let hint = hintLabel("⌃⌥Space list · ⌃⌥1 insert · ⌃⌥Esc dismiss")
-        let stack = NSStackView(views: [ghostCandidateLabel, hint])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 3
-        stack.edgeInsets = NSEdgeInsets(top: 7, left: 12, bottom: 7, right: 12)
-        let effect = styledEffectView()
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        effect.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: effect.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
-        ])
-        ghostView = effect
-    }
-
-    private func rebuildGhost() {
-        ghostCandidateLabel.stringValue = candidates.first ?? ""
-    }
-
-    private func buildListView() {
-        let header = hintLabel("Completions")
-        header.font = .systemFont(ofSize: 11, weight: .medium)
-        header.textColor = .secondaryLabelColor
-        let footer = hintLabel("⌃⌥1–3 insert · ⌃⌥↑↓ choose · ⌃⌥⏎ insert · ⌃⌥Esc dismiss")
-        listStack = NSStackView()
-        listStack.orientation = .vertical
-        listStack.alignment = .leading
-        listStack.spacing = 2
-        let stack = NSStackView(views: [header, listStack, footer])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 5
-        stack.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
-        let effect = styledEffectView()
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        effect.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: effect.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
-            listStack.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 10),
-            listStack.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -10),
-        ])
-        listView = effect
-    }
-
-    private func rebuildListRows() {
-        for v in listStack.arrangedSubviews {
-            listStack.removeArrangedSubview(v)
-            v.removeFromSuperview()
-        }
-        rowViews.removeAll()
-        let shown = min(candidates.count, maxRows)
-        for i in 0..<shown {
-            let row = makeRow(index: i, text: candidates[i])
-            row.translatesAutoresizingMaskIntoConstraints = false
-            row.heightAnchor.constraint(equalToConstant: 22).isActive = true
-            listStack.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: listStack.widthAnchor).isActive = true
-            rowViews.append(row)
-        }
-        if candidates.count > maxRows {
-            listStack.addArrangedSubview(hintLabel("… \(candidates.count - maxRows) more"))
-        }
-        updateRowHighlights()
-    }
-
-    private func makeRow(index: Int, text: String) -> CandidateRowView {
-        let row = CandidateRowView()
-        row.wantsLayer = true
-        row.layer?.cornerRadius = 5
-        let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 13)
-        label.lineBreakMode = .byTruncatingTail
-        label.translatesAutoresizingMaskIntoConstraints = false
-        row.addSubview(label)
-        var trailing: NSLayoutXAxisAnchor = row.trailingAnchor
-        if index < 3 {
-            let badge = hintLabel("⌃⌥\(index + 1)")
-            badge.translatesAutoresizingMaskIntoConstraints = false
-            row.addSubview(badge)
-            NSLayoutConstraint.activate([
-                badge.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -8),
-                badge.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            ])
-            trailing = badge.leadingAnchor
-        }
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 8),
-            label.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: trailing, constant: -6),
-        ])
-        row.onSelect = { [weak self] in
-            guard let self, self.eligible?() == true else { return }
-            self.selectedIndex = index
-            self.updateRowHighlights()
-        }
-        row.onAccept = { [weak self] in self?.acceptCandidate(index) }
-        return row
     }
 
     private func updateRowHighlights() {
@@ -586,7 +522,7 @@ final class Picker: NSObject {
             let f = panel.frame
             origin = NSPoint(x: f.minX, y: f.maxY + 4)
         } else {
-            origin = panelOrigin(size: capped)
+            origin = panelPlacement().map { panelOrigin(size: capped, placement: $0) } ?? .zero
         }
         statusPanel.setFrame(CGRect(origin: origin, size: capped), display: true)
     }
@@ -646,6 +582,10 @@ private final class NonactivatingPanel: NSPanel {
 
 /// One selectable list row. The panel is nonactivating but still receives
 /// mouse events, so single-click selects and double-click accepts.
+private final class FlippedDocument: NSView {
+    override var isFlipped: Bool { true }
+}
+
 private final class CandidateRowView: NSView {
     var onSelect: (() -> Void)?
     var onAccept: (() -> Void)?
