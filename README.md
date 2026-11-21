@@ -4,7 +4,7 @@ Capy Prompts 是 macOS 菜单栏工具。在 Capy Desktop 的对话输入框中�
 
 ## 启动
 
-在本目录运行 `./build-app.sh` 生成 `.build/Capy Prompts.app`。双击应用启动。构建脚本对最终应用使用 ad-hoc 签名，显式核对 `local.capyprompts.companion` 并验证签名完整性，无需钥匙串证书。macOS 默认用代码哈希识别这种签名。首次启动或升级到内容有变化的版本后，macOS 可能要求在“系统设置 → 隐私与安全性 → 辅助功能”中重新开启 Capy Prompts。该权限用于输入建议，广告隐藏不依赖它。菜单栏的 `Capy ✎` 可以暂停建议或退出。
+在本目录运行 `./build-app.sh` 生成 `.build/Capy Prompts.app`。双击应用启动。本机构建可使用专用代码签名证书。将登录钥匙串中已受信任且带私钥的代码签名证书的 40 位指纹写入 `~/Library/Application Support/CapyPrompts/signing-identity.sha1`。脚本使用该身份签名，并核对完整指定要求（应用标识符 `local.capyprompts.companion` 和签名证书）及签名完整性。配置的证书不可用时构建会失败。未配置指纹的机器默认使用 ad-hoc，内容变化后可能需要重新授权。切换签名身份后，从 `/Applications` 正常启动应用，在“系统设置 → 隐私与安全性 → 辅助功能”授权一次；后续升级应沿用同一证书、标识符和安装路径。该权限用于输入建议，广告隐藏不依赖它。菜单栏的 `Capy ✎` 可以暂停建议或退出。
 
 ## 模型配置
 
