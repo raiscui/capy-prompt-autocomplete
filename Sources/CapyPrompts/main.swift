@@ -6,6 +6,8 @@ final class Companion: NSObject, NSApplicationDelegate {
     private let editor = CapyEditor()
     private let catalog = ThreadSkillCatalog()
     private var offeredSkills: [ThreadSkill] = []
+    private let speech = ClipboardSpeech()
+    private var speechHotkeys: SpeechHotkeys?
     private let picker = Picker()
     private var generator: Generator?
     private var timer: Timer?
@@ -30,6 +32,9 @@ final class Companion: NSObject, NSApplicationDelegate {
         item.button?.toolTip = "Capy Prompts"
         let menu = NSMenu()
         menu.addItem(withTitle: "Pause suggestions", action: #selector(toggle(_:)), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        installSpeech(in: menu)
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Capy Prompts", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.menu = menu
         statusItem = item
@@ -56,6 +61,30 @@ final class Companion: NSObject, NSApplicationDelegate {
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
     }
+
+    private func installSpeech(in menu: NSMenu) {
+        let status = menu.addItem(withTitle: "剪贴板朗读 · 就绪", action: nil, keyEquivalent: "")
+        speech.onStatus = { [weak status] message in status?.title = "剪贴板朗读 · \(message)" }
+        menu.addItem(withTitle: "朗读 / 暂停 / 继续  ⌘F8", action: #selector(toggleSpeech), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "从头重播快照  ⇧⌘F8", action: #selector(restartSpeech), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "朗读新的剪贴板文本", action: #selector(readNewSpeech), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "停止朗读", action: #selector(stopSpeech), keyEquivalent: "").target = self
+        do {
+            speechHotkeys = try SpeechHotkeys { [weak self] binding in
+                switch binding {
+                case .toggle: self?.toggleSpeech()
+                case .replay: self?.restartSpeech()
+                }
+            }
+        } catch {
+            menu.addItem(withTitle: error.localizedDescription, action: nil, keyEquivalent: "")
+        }
+    }
+
+    @objc private func toggleSpeech() { speech.toggle() }
+    @objc private func restartSpeech() { speech.restart() }
+    @objc private func readNewSpeech() { speech.readNew() }
+    @objc private func stopSpeech() { speech.stop() }
 
     private var eligible: Bool {
         enabled && current != nil && NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "ai.capy.desktop"
@@ -188,6 +217,8 @@ final class Companion: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        speechHotkeys = nil
+        speech.stop()
         timer?.invalidate()
         request?.cancel()
         adHider?.shutdown()

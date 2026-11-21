@@ -135,8 +135,8 @@ public struct Generator: Sendable {
 		var reasoningEffort: String? = nil
 	}
 
-	private let configuration: Configuration
-	private let session: URLSession
+	let configuration: Configuration
+	let session: URLSession
 
 	/// Loads configuration from the environment and the config file, failing with a friendly
 	/// `GeneratorError` when the required fields are missing or malformed.
